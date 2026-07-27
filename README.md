@@ -15,19 +15,22 @@ browser Shopee already trusts, so no captcha. Auto-downloads one file per unit.
 
 Be **logged into shopee.co.id**, keep a Shopee tab active.
 
+Output mirrors the Python scripts exactly — one file **per page**, wrapped as
+`{ raw, metadata }`. Everything lands under **Downloads/shopee/**.
+
 ### 1. Products (store → products + links)
 1. Paste one or more **store URLs** (one per line) into the Products box.
 2. Set **Max store pages** (default 10) → **Scrape products**.
-3. It walks each store's `?page=0,1,2,…`, and per store saves to
-   **Downloads/shopee_products/**:
-   - `{store}_products.json` — raw products
-   - `{store}_links.json` — product URLs (`…-i.{shopid}.{itemid}`) ← feeds step 2
+3. Walks each store's `?page=0,1,2,…` and saves:
+   - `shopee/product/{store}/shopee_{store}_page_{N}.json` — `{ raw: item_cards, metadata: {store, platform, url} }`
+   - `shopee/links/list_link_product_shopee_{store}.json` — `[urls]` ← feeds step 2
 
 ### 2. Reviews (product links → reviews)
-1. Load a **product links JSON** (e.g. a `{store}_links.json` from step 1).
+1. Paste a **product links** list (e.g. from step 1) into the Reviews box.
 2. Set **Max review pages** (default 20) → **Scrape reviews**.
-3. Per product it pages through reviews and saves to
-   **Downloads/shopee_reviews/**: `shopee_reviews_{shopid}_{itemid}.json`.
+3. Per review page it saves:
+   - `shopee/review/{itemid}/shopee_comment_{itemid}_page_{N}.json` —
+     `{ raw: get_ratings data, metadata: {product_id, shop_id, platform, url, page} }`
 
 The badge shows progress (`store.page` or product number), then `✓` (done) / `✗`
 (blocked). Both batches are **resumable** — completed stores/links are skipped on

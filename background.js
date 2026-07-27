@@ -1,3 +1,13 @@
+// background.js  —  service worker. Two batch runs share this worker:
+//   • PRODUCT run: walks store URLs across ?page=0,1,2,…, saving ONE file per
+//     page as {raw, metadata}, plus a per-store links list.
+//   • REVIEW run: walks product URLs, paging through reviews, saving ONE file
+//     per review page as {raw, metadata}.
+// Output mirrors the Python scripts' structure exactly (full parity):
+//   shopee/product/{store}/shopee_{store}_page_{N}.json      {raw:item_cards, metadata}
+//   shopee/links/list_link_product_shopee_{store}.json       [urls]
+//   shopee/review/{itemid}/shopee_comment_{itemid}_page_{N}.json  {raw:get_ratings data, metadata}
+
 const LOG = (...a) => console.log("[ShopeeScraper/bg]", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -23,42 +33,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// ───────────────────────── capture + dedupe ───────────────────────
-function idsFromRatingsUrl(url) {
-  try {
-    const q = new URL(url, "https://shopee.co.id").searchParams;
-    return { itemid: q.get("itemid"), shopid: q.get("shopid") };
-  } catch {
-    return { itemid: null, shopid: null };
-  }
-}
-
-async function addCapture(kind, data, url) {
-  if (kind === "products") {
-    const items = (((data || {}).data || {}).centralize_item_card || {}).item_cards || [];
-    if (!items.length) return;
-    const store = await chrome.storage.local.get(["products"]);
-    const map = new Map((store.products || []).map((i) => [i.itemid, i]));
-    for (const it of items) if (it && it.itemid != null) map.set(it.itemid, it);
-    await chrome.storage.local.set({ products: [...map.values()], lastProdCapture: Date.now() });
-    LOG("captured", items.length, "products (buffer", map.size + ")");
-  } else if (kind === "reviews") {
-    const ratings = ((data || {}).data || {}).ratings || [];
-    await chrome.storage.local.set({ lastReviewCapture: Date.now() });
-    if (!ratings.length) return;
-    const { itemid, shopid } = idsFromRatingsUrl(url);
-    const store = await chrome.storage.local.get(["reviews"]);
-    const map = new Map((store.reviews || []).map((r) => [r.cmtid, r]));
-    for (const r of ratings) {
-      if (r && r.cmtid != null) map.set(r.cmtid, { ...r, _itemid: itemid, _shopid: shopid });
-    }
-    await chrome.storage.local.set({ reviews: [...map.values()] });
-    LOG("captured", ratings.length, "reviews (buffer", map.size + ")");
-  }
-}
-
-// Save an object as a JSON file in Downloads (service workers have no
-// URL.createObjectURL, so use a data: URL).
+// ───────────────────────── helpers ─────────────────────────
 async function dl(filename, obj) {
   const dataUrl = "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(obj, null, 2));
   await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
@@ -79,8 +54,59 @@ function storeNameFromUrl(u) {
     return null;
   }
 }
+function safeName(s) {
+  return (s || "store").replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
 function pageUrl(storeName, page) {
   return `https://shopee.co.id/${storeName}?page=${page}&sortBy=pop&tab=0`;
+}
+
+// get_ratings URL carries itemid/shopid/offset/limit
+function idsFromRatingsUrl(url) {
+  try {
+    const q = new URL(url, "https://shopee.co.id").searchParams;
+    return {
+      itemid: q.get("itemid"),
+      shopid: q.get("shopid"),
+      offset: parseInt(q.get("offset") || "0", 10),
+      limit: parseInt(q.get("limit") || "6", 10),
+    };
+  } catch {
+    return { itemid: null, shopid: null, offset: 0, limit: 6 };
+  }
+}
+
+// ───────────────────────── capture ─────────────────────────
+// Products → accumulate the current page's item_cards + store-wide links.
+// Reviews  → keep each review page's FULL get_ratings data, keyed by page.
+async function addCapture(kind, data, url) {
+  if (kind === "products") {
+    const items = (((data || {}).data || {}).centralize_item_card || {}).item_cards || [];
+    if (!items.length) return;
+    const cur = await chrome.storage.local.get(["pageItems", "storeLinks"]);
+    const pageMap = new Map((cur.pageItems || []).map((i) => [i.itemid, i]));
+    for (const it of items) if (it && it.itemid != null) pageMap.set(it.itemid, it);
+    const linkSet = new Set(cur.storeLinks || []);
+    for (const it of items) if (it && it.itemid != null) linkSet.add(productUrl(it));
+    await chrome.storage.local.set({
+      pageItems: [...pageMap.values()],
+      storeLinks: [...linkSet],
+      lastProdCapture: Date.now(),
+    });
+    LOG("captured", items.length, "products (page buffer", pageMap.size + ")");
+  } else if (kind === "reviews") {
+    const full = ((data || {}).data) || {};
+    await chrome.storage.local.set({ lastReviewCapture: Date.now() });
+    const ratings = full.ratings || [];
+    if (!ratings.length) return;
+    const { offset, limit } = idsFromRatingsUrl(url);
+    const page = Math.floor(offset / (limit || 6)) + 1;
+    const cur = await chrome.storage.local.get(["reviewPages"]);
+    const pages = cur.reviewPages || {};
+    pages[page] = full; // full get_ratings data for this page (ratings + summary + …)
+    await chrome.storage.local.set({ reviewPages: pages });
+    LOG("captured review page", page, "(", ratings.length, "ratings)");
+  }
 }
 
 // ═══════════════════════ PRODUCT store run ═══════════════════════
@@ -103,18 +129,11 @@ async function startProductRun({ stores, tabId, maxPages }) {
     await chrome.storage.local.set({ productStatus: "All stores already done." });
     return { ok: false, error: "nothing to do" };
   }
-
   await setPState({
-    active: true,
-    tabId,
-    stores: todo,
-    storeIndex: 0,
-    page: 0,
-    maxPages: maxPages || 10,
-    lastHandled: "",
-    pageStartTs: 0,
+    active: true, tabId, stores: todo, storeIndex: 0, page: 0,
+    maxPages: maxPages || 10, lastHandled: "", pageStartTs: 0,
   });
-  await chrome.storage.local.set({ products: [], productsTotal: 0 });
+  await chrome.storage.local.set({ pageItems: [], storeLinks: [], productsTotal: 0 });
   LOG("PRODUCT RUN START —", todo.length, "stores");
   chrome.action.setBadgeText({ text: "1.0" });
   chrome.tabs.update(tabId, { url: pageUrl(storeNameFromUrl(todo[0]), 0) });
@@ -151,52 +170,72 @@ async function onStorePageReady() {
 
   let captured = await waitForProdCapture(s.pageStartTs, 9000);
   if (!captured) {
-    LOG("store page", s.page, "no capture — nudging scroll");
-    chrome.tabs.sendMessage(s.tabId, { type: "AUTOSCROLL", rounds: 5 }, () => {
-      void chrome.runtime.lastError;
-    });
+    chrome.tabs.sendMessage(s.tabId, { type: "AUTOSCROLL", rounds: 5 }, () => void chrome.runtime.lastError);
     captured = await waitForProdCapture(s.pageStartTs, 9000);
   }
-  await afterStorePage(captured);
+  await afterStorePage();
 }
 
-async function afterStorePage(pageHadProducts) {
+async function afterStorePage() {
   const s = await getPState();
   if (!s.active) return;
 
+  const storeName = storeNameFromUrl(s.stores[s.storeIndex]) || "store";
+  const base = safeName(storeName);
+  const { pageItems = [] } = await chrome.storage.local.get(["pageItems"]);
+  const hadProducts = pageItems.length > 0;
+
+  // Save THIS page's file — parity with Python: {raw, metadata}.
+  if (hadProducts) {
+    await dl(`shopee/product/${base}/shopee_${base}_page_${s.page}.json`, {
+      raw: pageItems,
+      metadata: {
+        store: storeName,
+        platform: "shopee",
+        url: pageUrl(storeName, s.page),
+      },
+    });
+    const { productsTotal = 0 } = await chrome.storage.local.get(["productsTotal"]);
+    await chrome.storage.local.set({ productsTotal: productsTotal + pageItems.length });
+    LOG("saved product page", s.page, "(", pageItems.length, "items)");
+  }
+
   const nextPage = s.page + 1;
-  const storeFinished = !pageHadProducts || nextPage >= s.maxPages;
+  const storeFinished = !hadProducts || nextPage >= s.maxPages;
 
   if (!storeFinished) {
     s.page = nextPage;
     await setPState(s);
     await sleep(1200 + Math.random() * 1200);
-    chrome.tabs.update(s.tabId, { url: pageUrl(storeNameFromUrl(s.stores[s.storeIndex]), nextPage) });
+    chrome.tabs.update(s.tabId, { url: pageUrl(storeName, nextPage) });
     return;
   }
 
-  // Store done → download its two files from the buffer.
-  const storeUrlNow = s.stores[s.storeIndex];
-  const storeName = storeNameFromUrl(storeUrlNow) || "store";
-  const { products = [] } = await chrome.storage.local.get(["products"]);
-  const links = [...new Set(products.map(productUrl))];
-  const base = storeName.replace(/[^a-zA-Z0-9_.-]/g, "_");
-  await dl(`shopee_products/${base}_products.json`, { store: storeName, count: products.length, products });
-  await dl(`shopee_products/${base}_links.json`, links);
-  LOG("store", storeName, "saved", products.length, "products,", links.length, "links");
+  // Store done → save the links list (parity: list_link_product_shopee_{store}.json).
+  const { storeLinks = [] } = await chrome.storage.local.get(["storeLinks"]);
+  await dl(`shopee/links/list_link_product_shopee_${base}.json`, storeLinks);
+  LOG("store", storeName, "done —", storeLinks.length, "links");
 
-  const store = await chrome.storage.local.get(["storeDone", "productsTotal"]);
-  const storeDone = store.storeDone || [];
-  if (!storeDone.includes(storeUrlNow)) storeDone.push(storeUrlNow);
-  const productsTotal = (store.productsTotal || 0) + products.length;
-  await chrome.storage.local.set({ storeDone, productsTotal });
+  // Remember shopid → storeName so the review run can nest under the store name.
+  const shopMatch = /-i\.(\d+)\.\d+/.exec(storeLinks[0] || "");
+  if (shopMatch) {
+    const sb = (await chrome.storage.local.get(["storeByShop"])).storeByShop || {};
+    sb[shopMatch[1]] = storeName;
+    await chrome.storage.local.set({ storeByShop: sb });
+  }
+
+  const st = await chrome.storage.local.get(["storeDone"]);
+  const storeDone = st.storeDone || [];
+  if (!storeDone.includes(s.stores[s.storeIndex])) storeDone.push(s.stores[s.storeIndex]);
+  await chrome.storage.local.set({ storeDone, storeLinks: [] });
 
   const nextStore = s.storeIndex + 1;
   if (nextStore >= s.stores.length) {
     s.active = false;
     await setPState(s);
+    const { productsTotal = 0 } = await chrome.storage.local.get(["productsTotal"]);
     await chrome.storage.local.set({
-      productStatus: `Done — ${storeDone.length} stores, ${productsTotal} products total.`,
+      productStatus: `Done — ${storeDone.length} stores, ${productsTotal} products.`,
     });
     LOG("PRODUCT RUN FINISH");
     chrome.action.setBadgeText({ text: "✓" });
@@ -206,9 +245,8 @@ async function afterStorePage(pageHadProducts) {
   s.storeIndex = nextStore;
   s.page = 0;
   await setPState(s);
-  await chrome.storage.local.set({ products: [] }); // fresh buffer for next store
+  await chrome.storage.local.set({ pageItems: [] });
   await sleep(2500 + Math.random() * 2000);
-  LOG("→ next store", nextStore + 1, "/", s.stores.length);
   chrome.tabs.update(s.tabId, { url: pageUrl(storeNameFromUrl(s.stores[nextStore]), 0) });
 }
 
@@ -232,15 +270,9 @@ async function startReviewRun({ links, tabId, maxPages }) {
     await chrome.storage.local.set({ reviewStatus: "All links already done." });
     return { ok: false, error: "nothing to do" };
   }
-
   await setRState({
-    active: true,
-    tabId,
-    links: todo,
-    index: 0,
-    maxPages: maxPages || 20,
-    lastHandled: -1,
-    pageStartTs: 0,
+    active: true, tabId, links: todo, index: 0,
+    maxPages: maxPages || 20, lastHandled: -1, pageStartTs: 0,
   });
   await chrome.storage.local.set({ reviewsTotal: 0 });
   LOG("REVIEW RUN START —", todo.length, "products");
@@ -271,50 +303,52 @@ async function waitReviewDone(sinceTs, timeoutMs) {
 async function onReviewProductReady() {
   const s = await getRState();
   if (!s.active) return;
-
   chrome.action.setBadgeText({ text: String(s.index + 1) });
   await chrome.storage.local.set({
     reviewStatus: `Product ${s.index + 1}/${s.links.length} — scraping…`,
   });
-
   await sleep(1500 + Math.random() * 1000);
-  chrome.tabs.sendMessage(s.tabId, { type: "SCRAPE_REVIEWS", maxPages: s.maxPages }, () => {
-    void chrome.runtime.lastError;
-  });
-
+  chrome.tabs.sendMessage(s.tabId, { type: "SCRAPE_REVIEWS", maxPages: s.maxPages }, () => void chrome.runtime.lastError);
   const res = await waitReviewDone(s.pageStartTs, 240000);
   await afterProduct(s.links[s.index], res);
-}
-
-async function downloadProductReviews(url) {
-  const { reviews = [] } = await chrome.storage.local.get(["reviews"]);
-  const m = /-i\.(\d+)\.(\d+)/.exec(url);
-  const shopid = m ? m[1] : "x";
-  const itemid = m ? m[2] : "x";
-  await dl(`shopee_reviews/shopee_reviews_${shopid}_${itemid}.json`, {
-    product_url: url,
-    shopid,
-    itemid,
-    count: reviews.length,
-    reviews,
-  });
-  return reviews.length;
 }
 
 async function afterProduct(url, res) {
   const s = await getRState();
   if (!s.active) return;
 
-  const store = await chrome.storage.local.get(["reviewDone", "reviewFailed", "reviewsTotal"]);
+  const store = await chrome.storage.local.get(["reviewDone", "reviewFailed", "reviewsTotal", "reviewPages"]);
   const done = store.reviewDone || [];
   const failed = store.reviewFailed || [];
   let total = store.reviewsTotal || 0;
 
   if (res && res.ok) {
-    const n = await downloadProductReviews(url);
+    // Save one file per review page — parity with Python: {raw, metadata}.
+    const m = /-i\.(\d+)\.(\d+)/.exec(url);
+    const shopid = m ? m[1] : "x";
+    const itemid = m ? m[2] : "x";
+    // Nest under the store name if a prior product run mapped this shopid,
+    // else fall back to the numeric shopid (parity: review/{store}/{itemid}/…).
+    const storeByShop = (await chrome.storage.local.get(["storeByShop"])).storeByShop || {};
+    const storeFolder = safeName(storeByShop[shopid] || shopid);
+    const pages = store.reviewPages || {};
+    let n = 0;
+    for (const [page, full] of Object.entries(pages)) {
+      await dl(`shopee/review/${storeFolder}/${itemid}/shopee_comment_${itemid}_page_${page}.json`, {
+        raw: full,
+        metadata: {
+          product_id: itemid,
+          shop_id: shopid,
+          platform: "shopee",
+          url,
+          page: Number(page),
+        },
+      });
+      n += (full.ratings || []).length;
+    }
     total += n;
     if (!done.includes(url)) done.push(url);
-    LOG("product", s.index + 1, "saved", n, "reviews");
+    LOG("product", s.index + 1, "saved", Object.keys(pages).length, "pages,", n, "reviews");
   } else if (!failed.includes(url)) {
     failed.push(url);
     LOG("product", s.index + 1, "FAILED", res && res.error);
@@ -336,7 +370,7 @@ async function afterProduct(url, res) {
     s.active = false;
     await setRState(s);
     await chrome.storage.local.set({
-      reviewStatus: `Done — ${done.length} saved, ${failed.length} failed, ${total} reviews total.`,
+      reviewStatus: `Done — ${done.length} saved, ${failed.length} failed, ${total} reviews.`,
     });
     LOG("REVIEW RUN FINISH");
     chrome.action.setBadgeText({ text: "✓" });
@@ -354,14 +388,15 @@ async function afterProduct(url, res) {
 chrome.tabs.onUpdated.addListener(async (id, info) => {
   if (info.status !== "complete") return;
 
-  // Product store run takes priority.
+  // Product store run.
   const p = await getPState();
   if (p.active && id === p.tabId) {
     const key = `${p.storeIndex}:${p.page}`;
-    if (p.lastHandled === key) return; // 'complete' can fire twice per load
+    if (p.lastHandled === key) return;
     p.lastHandled = key;
     p.pageStartTs = Date.now();
     await setPState(p);
+    await chrome.storage.local.set({ pageItems: [] }); // fresh buffer per page
     LOG("store", p.storeIndex + 1, "page", p.page, "loaded");
     await onStorePageReady();
     return;
@@ -374,7 +409,7 @@ chrome.tabs.onUpdated.addListener(async (id, info) => {
     r.lastHandled = r.index;
     r.pageStartTs = Date.now();
     await setRState(r);
-    await chrome.storage.local.set({ reviews: [] }); // fresh buffer per product
+    await chrome.storage.local.set({ reviewPages: {} }); // fresh per product
     LOG("product", r.index + 1, "/", r.links.length, "loaded");
     await onReviewProductReady();
     return;
