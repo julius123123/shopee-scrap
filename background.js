@@ -39,6 +39,36 @@ async function dl(filename, obj) {
   await chrome.downloads.download({ url: dataUrl, filename, saveAs: false });
 }
 
+// POST one page ({type, raw, metadata}) to the configured API, if enabled.
+async function postToApi(type, payload) {
+  const { apiEnabled = false, apiUrl = "" } = await chrome.storage.local.get(["apiEnabled", "apiUrl"]);
+  if (!apiEnabled || !apiUrl) return;
+  try {
+    const res = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type, ...payload }),
+    });
+    const c = await chrome.storage.local.get(["apiSent", "apiFailed"]);
+    if (res.ok) {
+      await chrome.storage.local.set({ apiSent: (c.apiSent || 0) + 1 });
+    } else {
+      await chrome.storage.local.set({ apiFailed: (c.apiFailed || 0) + 1 });
+      LOG("API responded", res.status, type);
+    }
+  } catch (e) {
+    const c = await chrome.storage.local.get(["apiFailed"]);
+    await chrome.storage.local.set({ apiFailed: (c.apiFailed || 0) + 1 });
+    LOG("API error:", String(e));
+  }
+}
+
+// Save a page locally AND (if enabled) POST it to the API.
+async function saveAndSend(type, filename, payload) {
+  await dl(filename, payload);
+  await postToApi(type, payload);
+}
+
 // Rebuild product URL like the Python scraper: /{clean-name}-i.{shopid}.{itemid}
 function productUrl(item) {
   const raw = ((item.item_card_displayed_asset || {}).name) || "";
@@ -185,9 +215,9 @@ async function afterStorePage() {
   const { pageItems = [] } = await chrome.storage.local.get(["pageItems"]);
   const hadProducts = pageItems.length > 0;
 
-  // Save THIS page's file — parity with Python: {raw, metadata}.
+  // Save THIS page's file — parity with Python: {raw, metadata} — and POST it.
   if (hadProducts) {
-    await dl(`shopee/product/${base}/shopee_${base}_page_${s.page}.json`, {
+    await saveAndSend("product", `shopee/product/${base}/shopee_${base}_page_${s.page}.json`, {
       raw: pageItems,
       metadata: {
         store: storeName,
@@ -334,7 +364,7 @@ async function afterProduct(url, res) {
     const pages = store.reviewPages || {};
     let n = 0;
     for (const [page, full] of Object.entries(pages)) {
-      await dl(`shopee/review/${storeFolder}/${itemid}/shopee_comment_${itemid}_page_${page}.json`, {
+      await saveAndSend("review", `shopee/review/${storeFolder}/${itemid}/shopee_comment_${itemid}_page_${page}.json`, {
         raw: full,
         metadata: {
           product_id: itemid,
