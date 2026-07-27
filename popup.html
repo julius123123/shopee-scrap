@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font: 13px/1.4 system-ui, sans-serif; width: 268px; margin: 0; padding: 12px; }
+    h1 { font-size: 14px; margin: 0 0 8px; }
+    .row { display: flex; justify-content: space-between; align-items: center; margin: 6px 0; }
+    .count { font-weight: 600; font-variant-numeric: tabular-nums; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 6px; margin: 3px 0;
+            border: 1px solid #d0d0d0; border-radius: 6px; font-size: 12px; font-family: inherit; }
+    textarea { resize: vertical; }
+    button { width: 100%; padding: 7px; margin: 4px 0; border: 1px solid #d0d0d0;
+             border-radius: 6px; background: #f7f7f7; cursor: pointer; font-size: 13px; }
+    button:hover { background: #eee; }
+    button.primary { background: #ee4d2d; color: #fff; border-color: #ee4d2d; }
+    button.primary:hover { background: #d8431f; }
+    .half { display: flex; gap: 6px; }
+    .half button, .half input { margin: 4px 0; }
+    hr { border: none; border-top: 1px solid #eee; margin: 10px 0; }
+    .muted { color: #888; font-size: 11px; margin: 4px 0; }
+    .stat { font-size: 12px; font-weight: 600; color: #ee4d2d; min-height: 16px; }
+    label { font-size: 11px; color: #666; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Shopee Scraper</h1>
+
+  <!-- ══ PRODUCTS ══ -->
+  <label>Products — store URLs (one per line)</label>
+  <textarea id="storeUrls" rows="3" placeholder="https://shopee.co.id/dancowofficialstore&#10;https://shopee.co.id/…"></textarea>
+  <div class="half">
+    <input id="maxStorePages" type="number" min="1" value="10" title="Max store pages" style="width:64px" />
+    <button class="primary" id="prodStart" style="flex:1">Scrape products</button>
+  </div>
+  <div class="half">
+    <button id="prodStop" style="flex:1">Stop</button>
+    <button id="prodReset" style="flex:1">Reset</button>
+  </div>
+  <div class="row"><span class="muted">Products saved</span><span class="count" id="ptotal">0</span></div>
+  <div id="pstatus" class="stat">Idle</div>
+  <p class="muted">Per store → Downloads/shopee_products/{store}_products.json + _links.json</p>
+
+  <hr />
+
+  <!-- ══ REVIEWS ══ -->
+  <label>Reviews — product links JSON</label>
+  <input id="linksFile" type="file" accept=".json" />
+  <div id="linksInfo" class="muted">No file loaded.</div>
+  <div class="half">
+    <input id="maxReviewPages" type="number" min="1" value="20" title="Max review pages" style="width:64px" />
+    <button class="primary" id="batchStart" style="flex:1">Scrape reviews</button>
+  </div>
+  <div class="half">
+    <button id="batchStop" style="flex:1">Stop</button>
+    <button id="batchReset" style="flex:1">Reset</button>
+  </div>
+  <div class="row"><span class="muted">Reviews saved</span><span class="count" id="rtotal">0</span></div>
+  <div id="rstatus" class="stat">Idle</div>
+  <p class="muted">Per product → Downloads/shopee_reviews/shopee_reviews_{shopid}_{itemid}.json</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

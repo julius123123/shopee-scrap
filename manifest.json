@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Shopee Review Scraper",
+  "version": "2.0",
+  "description": "Batch-scrape Shopee product reviews from your own logged-in browser. One JSON file per product.",
+  "permissions": ["storage", "tabs", "downloads"],
+  "host_permissions": ["*://shopee.co.id/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Shopee Review Scraper"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://shopee.co.id/*"],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://shopee.co.id/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
