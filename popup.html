@@ -44,9 +44,11 @@
   <hr />
 
   <!-- ══ REVIEWS ══ -->
-  <label>Reviews — product links JSON</label>
+  <label>Reviews — paste product links (JSON array or one per line)</label>
+  <textarea id="reviewLinksText" rows="3" placeholder='Paste a links JSON array, or one product URL per line (…-i.{shopid}.{itemid})'></textarea>
+  <div id="linksInfo" class="muted">No links yet.</div>
+  <label style="font-weight:400;color:#999">…or load a .json file (may not work on Linux)</label>
   <input id="linksFile" type="file" accept=".json" />
-  <div id="linksInfo" class="muted">No file loaded.</div>
   <div class="half">
     <input id="maxReviewPages" type="number" min="1" value="20" title="Max review pages" style="width:64px" />
     <button class="primary" id="batchStart" style="flex:1">Scrape reviews</button>

@@ -1,3 +1,5 @@
+// popup.js  —  UI for both batches: products (store URLs) and reviews (links).
+
 async function refresh() {
   const {
     productsTotal = 0,
@@ -45,29 +47,59 @@ document.getElementById("prodReset").addEventListener("click", async () => {
   document.getElementById("pstatus").textContent = "Progress reset.";
 });
 
-// ─────────────────────── reviews (links JSON) ───────────────────────
+// ─────────────────────── reviews (paste or file) ───────────────────────
 let batchLinks = [];
+const info = () => document.getElementById("linksInfo");
 
+// Accept a JSON array OR newline/comma-separated URLs. Keep only product URLs.
+function parseLinks(text) {
+  const t = (text || "").trim();
+  if (!t) return [];
+  let arr = null;
+  try {
+    const p = JSON.parse(t);
+    if (Array.isArray(p)) arr = p;
+  } catch (e) {}
+  if (!arr) arr = t.split(/[\n,]+/);
+  return arr
+    .map((s) => String(s).trim().replace(/^["']|["',]+$/g, ""))
+    .filter((u) => u.includes("-i."));
+}
+
+async function showRemaining() {
+  const { reviewDone = [] } = await chrome.storage.local.get(["reviewDone"]);
+  const remaining = batchLinks.filter((l) => !reviewDone.includes(l)).length;
+  info().textContent = `${batchLinks.length} links — ${remaining} remaining.`;
+}
+
+// Paste box (primary, works on all platforms)
+document.getElementById("reviewLinksText").addEventListener("input", async (ev) => {
+  batchLinks = parseLinks(ev.target.value);
+  if (batchLinks.length) await showRemaining();
+  else info().textContent = "No valid product links detected.";
+});
+
+// File picker (fallback; may close the popup on Linux)
 document.getElementById("linksFile").addEventListener("change", async (ev) => {
   const file = ev.target.files && ev.target.files[0];
-  const info = document.getElementById("linksInfo");
   if (!file) return;
   try {
-    const parsed = JSON.parse(await file.text());
-    if (!Array.isArray(parsed)) throw new Error("JSON must be an array of URLs");
-    batchLinks = parsed.filter((u) => typeof u === "string" && u.includes("-i."));
-    const { reviewDone = [] } = await chrome.storage.local.get(["reviewDone"]);
-    const remaining = batchLinks.filter((l) => !reviewDone.includes(l)).length;
-    info.textContent = `${batchLinks.length} links — ${remaining} remaining.`;
+    batchLinks = parseLinks(await file.text());
+    if (!batchLinks.length) throw new Error("no product links in file");
+    await showRemaining();
   } catch (e) {
     batchLinks = [];
-    info.textContent = `Invalid file: ${e.message}`;
+    info().textContent = `Invalid file: ${e.message}`;
   }
 });
 
 document.getElementById("batchStart").addEventListener("click", async () => {
   if (!batchLinks.length) {
-    document.getElementById("linksInfo").textContent = "Load a links JSON first.";
+    // last-chance parse in case 'input' didn't fire
+    batchLinks = parseLinks(document.getElementById("reviewLinksText").value);
+  }
+  if (!batchLinks.length) {
+    info().textContent = "Paste links (or load a file) first.";
     return;
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -75,7 +107,7 @@ document.getElementById("batchStart").addEventListener("click", async () => {
   chrome.runtime.sendMessage(
     { type: "REVIEWRUN_START", links: batchLinks, tabId: tab.id, maxPages },
     (res) => {
-      if (res && !res.ok) document.getElementById("linksInfo").textContent = `Not started: ${res.error}`;
+      if (res && !res.ok) info().textContent = `Not started: ${res.error}`;
     }
   );
 });
@@ -86,8 +118,7 @@ document.getElementById("batchStop").addEventListener("click", () => {
 
 document.getElementById("batchReset").addEventListener("click", async () => {
   await chrome.storage.local.set({ reviewDone: [], reviewFailed: [], reviewsTotal: 0 });
-  document.getElementById("linksInfo").textContent =
-    `${batchLinks.length} links — ${batchLinks.length} remaining.`;
+  info().textContent = `${batchLinks.length} links — ${batchLinks.length} remaining.`;
 });
 
 refresh();
