@@ -6,17 +6,56 @@ async function refresh() {
     productStatus = "Idle",
     reviewsTotal = 0,
     reviewStatus = "Idle",
+    apiEnabled = false,
+    apiSent = 0,
+    apiFailed = 0,
   } = await chrome.storage.local.get([
     "productsTotal",
     "productStatus",
     "reviewsTotal",
     "reviewStatus",
+    "apiEnabled",
+    "apiSent",
+    "apiFailed",
   ]);
   document.getElementById("ptotal").textContent = productsTotal;
   document.getElementById("pstatus").textContent = productStatus;
   document.getElementById("rtotal").textContent = reviewsTotal;
   document.getElementById("rstatus").textContent = reviewStatus;
+  document.getElementById("apiStatus").textContent = apiEnabled
+    ? `API: on — sent ${apiSent}, failed ${apiFailed}`
+    : "API: off";
 }
+
+// ─────────────────────── API settings ───────────────────────
+async function loadApiConfig() {
+  const { apiUrl = "", apiEnabled = false } = await chrome.storage.local.get(["apiUrl", "apiEnabled"]);
+  document.getElementById("apiUrl").value = apiUrl;
+  document.getElementById("apiEnabled").checked = apiEnabled;
+}
+
+document.getElementById("apiUrl").addEventListener("input", (ev) => {
+  chrome.storage.local.set({ apiUrl: ev.target.value.trim() });
+});
+document.getElementById("apiEnabled").addEventListener("change", (ev) => {
+  chrome.storage.local.set({ apiEnabled: ev.target.checked });
+});
+document.getElementById("apiTest").addEventListener("click", async () => {
+  const url = document.getElementById("apiUrl").value.trim();
+  const el = document.getElementById("apiStatus");
+  if (!url) { el.textContent = "Enter an API URL first."; return; }
+  el.textContent = "Testing…";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "test", raw: {}, metadata: { platform: "shopee", ping: true } }),
+    });
+    el.textContent = res.ok ? `Test OK (${res.status})` : `Test failed: HTTP ${res.status}`;
+  } catch (e) {
+    el.textContent = `Test error: ${e.message}`;
+  }
+});
 
 // ─────────────────────── products (store URLs) ───────────────────────
 document.getElementById("prodStart").addEventListener("click", async () => {
@@ -121,5 +160,6 @@ document.getElementById("batchReset").addEventListener("click", async () => {
   info().textContent = `${batchLinks.length} links — ${batchLinks.length} remaining.`;
 });
 
+loadApiConfig();
 refresh();
 setInterval(refresh, 1000);

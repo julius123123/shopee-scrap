@@ -26,6 +26,19 @@
 <body>
   <h1>Shopee Scraper</h1>
 
+  <!-- ══ API ══ -->
+  <label>API endpoint (optional)</label>
+  <input id="apiUrl" type="text" placeholder="https://your-api.example.com/ingest" />
+  <label style="font-weight:400;display:flex;align-items:center;gap:6px">
+    <input id="apiEnabled" type="checkbox" style="width:auto;margin:0" /> Send each page to API
+  </label>
+  <div class="half">
+    <button id="apiTest" style="flex:1">Test connection</button>
+  </div>
+  <div id="apiStatus" class="muted">API: off</div>
+
+  <hr />
+
   <!-- ══ PRODUCTS ══ -->
   <label>Products — store URLs (one per line)</label>
   <textarea id="storeUrls" rows="3" placeholder="https://shopee.co.id/dancowofficialstore&#10;https://shopee.co.id/…"></textarea>
