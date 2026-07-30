@@ -1,13 +1,3 @@
-// background.js  —  service worker. Two batch runs share this worker:
-//   • PRODUCT run: walks store URLs across ?page=0,1,2,…, saving ONE file per
-//     page as {raw, metadata}, plus a per-store links list.
-//   • REVIEW run: walks product URLs, paging through reviews, saving ONE file
-//     per review page as {raw, metadata}.
-// Output mirrors the Python scripts' structure exactly (full parity):
-//   shopee/product/{store}/shopee_{store}_page_{N}.json      {raw:item_cards, metadata}
-//   shopee/links/list_link_product_shopee_{store}.json       [urls]
-//   shopee/review/{itemid}/shopee_comment_{itemid}_page_{N}.json  {raw:get_ratings data, metadata}
-
 const LOG = (...a) => console.log("[ShopeeScraper/bg]", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -129,13 +119,40 @@ async function addCapture(kind, data, url) {
     await chrome.storage.local.set({ lastReviewCapture: Date.now() });
     const ratings = full.ratings || [];
     if (!ratings.length) return;
-    const { offset, limit } = idsFromRatingsUrl(url);
-    const page = Math.floor(offset / (limit || 6)) + 1;
-    const cur = await chrome.storage.local.get(["reviewPages"]);
-    const pages = cur.reviewPages || {};
-    pages[page] = full; // full get_ratings data for this page (ratings + summary + …)
-    await chrome.storage.local.set({ reviewPages: pages });
-    LOG("captured review page", page, "(", ratings.length, "ratings)");
+
+    // Save + POST THIS review page immediately (per-page), during a review run.
+    const rr = await getRState();
+    if (!rr.active) return;
+    const productUrlNow = rr.links[rr.index];
+    const pm = /-i\.(\d+)\.(\d+)/.exec(productUrlNow || "");
+    const pShop = pm ? pm[1] : "x";
+    const pItem = pm ? pm[2] : "x";
+
+    // Ignore ratings from a different item (e.g. "similar products" widgets).
+    const u = idsFromRatingsUrl(url);
+    if (u.itemid && pItem !== "x" && String(u.itemid) !== pItem) return;
+
+    const page = Math.floor(u.offset / (u.limit || 6)) + 1;
+
+    // Dedup: a page can fire more than once (offset=0 on load, re-renders…).
+    const savedKey = `${pItem}_${page}`;
+    const saved = (await chrome.storage.local.get(["reviewSaved"])).reviewSaved || {};
+    if (saved[savedKey]) return;
+    saved[savedKey] = true;
+
+    const storeByShop = (await chrome.storage.local.get(["storeByShop"])).storeByShop || {};
+    const storeFolder = safeName(storeByShop[pShop] || pShop);
+    await saveAndSend("review", `shopee/review/${storeFolder}/${pItem}/shopee_comment_${pItem}_page_${page}.json`, {
+      raw: full,
+      metadata: { product_id: pItem, shop_id: pShop, platform: "shopee", url: productUrlNow, page },
+    });
+
+    const c = await chrome.storage.local.get(["reviewsTotal"]);
+    await chrome.storage.local.set({
+      reviewSaved: saved,
+      reviewsTotal: (c.reviewsTotal || 0) + ratings.length,
+    });
+    LOG("saved review page", page, "(", ratings.length, "ratings) ->", storeFolder + "/" + pItem);
   }
 }
 
@@ -215,7 +232,7 @@ async function afterStorePage() {
   const { pageItems = [] } = await chrome.storage.local.get(["pageItems"]);
   const hadProducts = pageItems.length > 0;
 
-  // Save THIS page's file — parity with Python: {raw, metadata} — and POST it.
+  // Save THIS page's fils
   if (hadProducts) {
     await saveAndSend("product", `shopee/product/${base}/shopee_${base}_page_${s.page}.json`, {
       raw: pageItems,
@@ -236,7 +253,7 @@ async function afterStorePage() {
   if (!storeFinished) {
     s.page = nextPage;
     await setPState(s);
-    await sleep(1200 + Math.random() * 1200);
+    await sleep(2500 + Math.random() * 4000); // human-ish gap between pages
     chrome.tabs.update(s.tabId, { url: pageUrl(storeName, nextPage) });
     return;
   }
@@ -276,7 +293,7 @@ async function afterStorePage() {
   s.page = 0;
   await setPState(s);
   await chrome.storage.local.set({ pageItems: [] });
-  await sleep(2500 + Math.random() * 2000);
+  await sleep(6000 + Math.random() * 7000); // human-ish gap between stores
   chrome.tabs.update(s.tabId, { url: pageUrl(storeNameFromUrl(s.stores[nextStore]), 0) });
 }
 
@@ -337,7 +354,7 @@ async function onReviewProductReady() {
   await chrome.storage.local.set({
     reviewStatus: `Product ${s.index + 1}/${s.links.length} — scraping…`,
   });
-  await sleep(1500 + Math.random() * 1000);
+  await sleep(2500 + Math.random() * 3000); // let the SPA settle (human-ish)
   chrome.tabs.sendMessage(s.tabId, { type: "SCRAPE_REVIEWS", maxPages: s.maxPages }, () => void chrome.runtime.lastError);
   const res = await waitReviewDone(s.pageStartTs, 240000);
   await afterProduct(s.links[s.index], res);
@@ -347,43 +364,20 @@ async function afterProduct(url, res) {
   const s = await getRState();
   if (!s.active) return;
 
-  const store = await chrome.storage.local.get(["reviewDone", "reviewFailed", "reviewsTotal", "reviewPages"]);
+  const store = await chrome.storage.local.get(["reviewDone", "reviewFailed", "reviewsTotal"]);
   const done = store.reviewDone || [];
   const failed = store.reviewFailed || [];
-  let total = store.reviewsTotal || 0;
+  const total = store.reviewsTotal || 0;
 
+  // Files were already saved per-page in addCapture — here we just record status.
   if (res && res.ok) {
-    // Save one file per review page — parity with Python: {raw, metadata}.
-    const m = /-i\.(\d+)\.(\d+)/.exec(url);
-    const shopid = m ? m[1] : "x";
-    const itemid = m ? m[2] : "x";
-    // Nest under the store name if a prior product run mapped this shopid,
-    // else fall back to the numeric shopid (parity: review/{store}/{itemid}/…).
-    const storeByShop = (await chrome.storage.local.get(["storeByShop"])).storeByShop || {};
-    const storeFolder = safeName(storeByShop[shopid] || shopid);
-    const pages = store.reviewPages || {};
-    let n = 0;
-    for (const [page, full] of Object.entries(pages)) {
-      await saveAndSend("review", `shopee/review/${storeFolder}/${itemid}/shopee_comment_${itemid}_page_${page}.json`, {
-        raw: full,
-        metadata: {
-          product_id: itemid,
-          shop_id: shopid,
-          platform: "shopee",
-          url,
-          page: Number(page),
-        },
-      });
-      n += (full.ratings || []).length;
-    }
-    total += n;
     if (!done.includes(url)) done.push(url);
-    LOG("product", s.index + 1, "saved", Object.keys(pages).length, "pages,", n, "reviews");
+    LOG("product", s.index + 1, "done —", url);
   } else if (!failed.includes(url)) {
     failed.push(url);
     LOG("product", s.index + 1, "FAILED", res && res.error);
   }
-  await chrome.storage.local.set({ reviewDone: done, reviewFailed: failed, reviewsTotal: total });
+  await chrome.storage.local.set({ reviewDone: done, reviewFailed: failed });
 
   if (res && res.error === "blocked") {
     s.active = false;
@@ -410,7 +404,7 @@ async function afterProduct(url, res) {
   s.index = next;
   s.lastHandled = -1;
   await setRState(s);
-  await sleep(4000 + Math.random() * 4000);
+  await sleep(6000 + Math.random() * 9000); // human-ish gap between products (6–15s)
   chrome.tabs.update(s.tabId, { url: s.links[next] });
 }
 
@@ -439,7 +433,7 @@ chrome.tabs.onUpdated.addListener(async (id, info) => {
     r.lastHandled = r.index;
     r.pageStartTs = Date.now();
     await setRState(r);
-    await chrome.storage.local.set({ reviewPages: {} }); // fresh per product
+    await chrome.storage.local.set({ reviewSaved: {} }); // fresh dedup per product
     LOG("product", r.index + 1, "/", r.links.length, "loaded");
     await onReviewProductReady();
     return;

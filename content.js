@@ -1,3 +1,5 @@
+// content.js  —  ISOLATED world. Forwards captures to background, and drives
+// human-like scrolling / clicking on the page (products + review pagination).
 (function () {
   // Relay captured payloads (products or reviews) → background.
   window.addEventListener("message", (ev) => {
@@ -8,7 +10,7 @@
 
   chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
     if (req.type === "AUTOSCROLL") {
-      autoScroll(req.rounds || 8).then(() => sendResponse({ ok: true }));
+      humanScroll(req.rounds || 8).then(() => sendResponse({ ok: true }));
       return true; // async response
     }
     if (req.type === "SCRAPE_REVIEWS") {
@@ -29,17 +31,56 @@
     }
   });
 
+  // ───────────────────── human-ish primitives ─────────────────────
+  const rand = (min, max) => min + Math.random() * (max - min);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pause = (min, max) => sleep(rand(min, max));
   const status = (t) => chrome.storage.local.set({ reviewStatus: t });
 
-  // ───────────────────── product-page scroll ─────────────────────
-  async function autoScroll(rounds) {
-    for (let i = 0; i < rounds; i++) {
-      window.scrollBy(0, 1200);
-      await sleep(1000 + Math.random() * 700);
+  // Move the "cursor" toward an element in small jittery steps, then hover.
+  async function humanMoveTo(el) {
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const tx = r.left + r.width * rand(0.3, 0.7);
+    const ty = r.top + r.height * rand(0.3, 0.7);
+    let x = rand(0, window.innerWidth);
+    let y = rand(0, window.innerHeight);
+    const steps = Math.floor(rand(5, 9));
+    for (let i = 1; i <= steps; i++) {
+      x += (tx - x) * (i / steps) + rand(-6, 6);
+      y += (ty - y) * (i / steps) + rand(-6, 6);
+      document.dispatchEvent(new MouseEvent("mousemove", { clientX: x, clientY: y, bubbles: true }));
+      await sleep(rand(18, 55));
     }
-    window.scrollTo(0, document.body.scrollHeight);
-    await sleep(1500);
+    el.dispatchEvent(new MouseEvent("mouseover", { clientX: tx, clientY: ty, bubbles: true }));
+    el.dispatchEvent(new MouseEvent("mousemove", { clientX: tx, clientY: ty, bubbles: true }));
+  }
+
+  // Hover, tiny hesitation, full mousedown/up/click.
+  async function humanClick(el) {
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    await pause(300, 800);
+    await humanMoveTo(el);
+    await pause(120, 420);
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await sleep(rand(40, 130));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    el.click();
+  }
+
+  // Variable scroll: uneven steps, easing pauses, occasional read-pause & scroll-up.
+  async function humanScroll(rounds) {
+    for (let i = 0; i < rounds; i++) {
+      window.scrollBy({ top: rand(500, 1100), behavior: "smooth" });
+      await pause(650, 1500);
+      if (Math.random() < 0.18) await pause(1300, 3000);          // "reading"
+      if (Math.random() < 0.10) {                                  // glance back up
+        window.scrollBy({ top: -rand(150, 380), behavior: "smooth" });
+        await pause(500, 1100);
+      }
+    }
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+    await pause(1200, 2200);
   }
 
   // ───────────────────── review pagination ─────────────────────
@@ -73,13 +114,20 @@
     return false;
   }
 
+  // Scroll down gradually until the ratings section renders (fires offset=0).
   async function reachReviews() {
     for (let i = 0; i < 12; i++) {
       if (findPager() || reviewCount() > 0) return true;
-      window.scrollBy(0, 1000);
-      await sleep(900 + Math.random() * 500);
+      window.scrollBy({ top: rand(700, 1100), behavior: "smooth" });
+      await pause(800, 1600);
     }
     return findPager() || reviewCount() > 0;
+  }
+
+  // A "reading" delay that scales with how many reviews are on the page.
+  async function readPause() {
+    const n = reviewCount();
+    await pause(1200 + n * 120, 2600 + n * 260);
   }
 
   async function scrapeReviews(maxPages) {
@@ -100,20 +148,18 @@
 
     let page = 1;
     for (; page < maxPages; page++) {
+      await readPause(); // linger on the current page like a reader
+
       const next = findNextButton();
       if (!next) break;
       if (next.disabled || next.getAttribute("aria-disabled") === "true") break;
 
-      next.scrollIntoView({ block: "center" });
-      await sleep(400);
-
       const ts = Date.now();
-      next.click();
+      await humanClick(next);
       await status(`Review page ${page + 1}…`);
 
       const got = await waitReviewCapture(ts);
       if (!got) break;
-      await sleep(900 + Math.random() * 1100);
     }
 
     return { ok: true, pages: page };

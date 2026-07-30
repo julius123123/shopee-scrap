@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""
-Local test receiver for the Shopee Scraper extension's "Send to API" mode.
-Zero dependencies (Python stdlib only).
-
-Run:
-    python chrome_extension/test_api_server.py            # port 8000
-    python chrome_extension/test_api_server.py 9000       # custom port
-
-Binds 0.0.0.0 → reachable on the LAN. In the extension popup set:
-    API endpoint = http://<server-ip>:8000/ingest   (or http://localhost:8000/ingest)
-    tick "Send each page to API"
-
-Each POST is printed AND its body saved, reconstructing the same tree the
-extension writes locally so you can compare payload → file:
-    api_received/shopee/product/{store}/shopee_{store}_page_{N}.json
-    api_received/shopee/review/{shop_id}/{product_id}/shopee_comment_{product_id}_page_{N}.json
-    api_received/other/NNNN_{type}.json   (test pings / unknown)
-"""
 import json
 import os
 import re

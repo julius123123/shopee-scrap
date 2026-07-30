@@ -1,42 +1,109 @@
-# Shopee Scraper (Chrome Extension)
+# Shopee Scraper (Ekstensi Chrome)
 
-Scrapes Shopee **store products** and **product reviews** from *your own logged-in
-Chrome* — reads Shopee's own API responses (`rcmd_items`, `get_ratings`) inside a
-browser Shopee already trusts, so no captcha. Auto-downloads one file per unit.
+Melakukan scraping **produk toko** dan **ulasan produk** Shopee langsung dari
+Chrome. Setiap halaman disimpan sebagai file JSON dan bisa dikirim ke API secara otomatis saat scraping.
 
-## Install (load unpacked)
 
-1. `chrome://extensions` → **Developer mode** ON → **Load unpacked** → this folder
-2. Pin the extension. Requires Chrome 111+ (`world: "MAIN"` content scripts).
-3. In Chrome download settings, turn **off** "Ask where to save each file" so the
-   batch can save unattended.
 
-## Use — two batches
+## Cara Kerja
+Shopee memuat data dari API internal (`api/v4/shop/rcmd_items` untuk produk,
+`api/v2/item/get_ratings` untuk ulasan). Ekstensi ini merekam respons API tersebut . Ada empat bagian yang saling mengoper data:
 
-Be **logged into shopee.co.id**, keep a Shopee tab active.
+```
+interceptor.js ─▶ content.js ─▶ background.js ─▶ popup
+   (menangkap)    (meneruskan,   (menyimpan,          (tombol,
+                   scroll,         menjalankan batch,   hitungan,
+                   klik)           simpan + kirim API)  konfigurasi API)
+```
 
-Output mirrors the Python scripts exactly — one file **per page**, wrapped as
-`{ raw, metadata }`. Everything lands under **Downloads/shopee/**.
+- **interceptor.js** berjalan di dalam halaman Shopee (MAIN world) dan membaca salinan
+  setiap respons `rcmd_items` / `get_ratings`.
+- **content.js** meneruskan hasil tangkapan ke background, serta melakukan scroll / klik
+  tombol halaman ulasan saat diperintah.
+- **background.js**: menavigasi tab melewati halaman toko / URL produk,
+  mengumpulkan tangkapan, lalu menyimpan tiap halaman ke disk (dan opsional ke API).
+- **popup**: panel kontrol 
 
-### 1. Products (store → products + links)
-1. Paste one or more **store URLs** (one per line) into the Products box.
-2. Set **Max store pages** (default 10) → **Scrape products**.
-3. Walks each store's `?page=0,1,2,…` and saves:
-   - `shopee/product/{store}/shopee_{store}_page_{N}.json` — `{ raw: item_cards, metadata: {store, platform, url} }`
-   - `shopee/links/list_link_product_shopee_{store}.json` — `[urls]` ← feeds step 2
+Semuanya digerakkan oleh event page-load dan disimpan di `chrome.storage`, sehingga sebuah
+run bisa dilanjutkan (resumable) dan tetap aman meski Chrome menghentikan background worker.
 
-### 2. Reviews (product links → reviews)
-1. Paste a **product links** list (e.g. from step 1) into the Reviews box.
-2. Set **Max review pages** (default 20) → **Scrape reviews**.
-3. Per review page it saves:
-   - `shopee/review/{itemid}/shopee_comment_{itemid}_page_{N}.json` —
-     `{ raw: get_ratings data, metadata: {product_id, shop_id, platform, url, page} }`
+---
 
-The badge shows progress (`store.page` or product number), then `✓` (done) / `✗`
-(blocked). Both batches are **resumable** — completed stores/links are skipped on
-the next run. Use **Reset** to clear that progress. Run one batch at a time.
+## Instalasi
 
-## Notes
-- If Shopee shows a `/verify/` page, the review batch stops (a block affects all
-  following products). Browse normally a bit, then resume.
-- Everything runs in your real session; it only reads responses Shopee already fetched.
+1. Buka `chrome://extensions`
+2. Aktifkan **Developer mode** (pojok kanan atas)
+3. **Load unpacked** → pilih folder `chrome_extension` ini
+4. Pin ekstensinya. Butuh **Chrome 111+** 
+5. Di pengaturan download Chrome, **matikan** opsi "Tanyakan tempat menyimpan setiap file
+   sebelum mengunduh" agar batch bisa menyimpan tanpa gangguan.
+
+
+## Fitur
+
+- **Scraping produk** — menelusuri `?page=0,1,2,…` sebuah toko, satu file per halaman.
+- **Scraping ulasan** — menelusuri daftar URL produk, membuka tiap halaman ulasan produk,
+  satu file per halaman ulasan.
+- **Resumable** — toko/link yang sudah selesai akan dilewati saat run ulang (Reset untuk menghapus).
+- **Auto-stop** — toko berhenti saat sebuah halaman tidak mengembalikan produk; produk
+  berhenti di halaman ulasan terakhir.
+
+## Cara Pakai
+
+Pastikan sudah login ke shopee.co.id dan biarkan satu tab Shopee aktif.
+
+### 1. Produk (toko --> produk + link)
+1. Tempel satu atau beberapa **URL toko** (satu per baris) di kotak Products.
+2. Atur **Max store pages** (default 10) → **Scrape products**.
+3. Tab akan menelusuri tiap halaman toko; badge menampilkan `toko.halaman`, lalu `✓`.
+
+### 2. Ulasan (link produk --> ulasan)
+1. Tempel **link produk** di kotak Reviews, bisa berupa array JSON *atau* satu URL perbaris (`…-i.{shopid}.{itemid}`). Dapat menggunakan hasil scrape Produk.
+2. Atur **Max review pages** (default 20) → **Scrape reviews**.
+3. Ekstensi membuka tiap produk, menelusuri halaman ulasan, dan menyimpan per halaman.
+
+
+### 3. Kirim ke API (opsional)
+1. Isi **API endpoint** 
+2. **Test connection** mengirim ping `{type:"test"}`.
+3. Centang **Send each page to API**. File tetap disimpan lokal *dan* tiap halaman
+   di-POST. Baris status menampilkan `API: on — sent N, failed N`.
+
+## Cara Hasil Disimpan
+
+### File lokal (selalu) — di dalam `Downloads/shopee/`
+
+Satu file **per halaman**, dibungkus `{ raw, metadata }` (sama persis dengan script Python):
+
+```
+shopee/product/{toko}/shopee_{toko}_page_{N}.json
+   { "raw": [ …item_cards… ],
+     "metadata": { "store", "platform", "url" } }
+
+shopee/links/list_link_product_shopee_{toko}.json
+   [ "https://shopee.co.id/…-i.{shopid}.{itemid}", … ]
+
+shopee/review/{toko|shopid}/{itemid}/shopee_comment_{itemid}_page_{N}.json
+   { "raw": { …data get_ratings: ratings + summary + has_more… },
+     "metadata": { "product_id", "shop_id", "platform", "url", "page" } }
+```
+
+File ulasan tersusun di bawah **nama toko** jika produk toko tersebut sudah di-scrape
+lebih dulu (run mengingat `shopid → toko`); jika tidak, tersusun di bawah **shopid**
+(angka).
+
+### Payload API (jika diaktifkan)
+
+Satu `POST {endpoint}` **per halaman**, `Content-Type: application/json`, tanpa auth:
+
+```jsonc
+{ "type": "product" | "review",   // jenis halaman, untuk routing
+  "raw":  { … },                   // sama dengan "raw" file lokal
+  "metadata": { … } }              // sama dengan "metadata" file lokal
+```
+
+Untuk uji coba lokal, jalankan
+```
+python test_api_server.py            # mendengarkan di 127.0.0.1:8000/ingest
+```
+Receiver ini menyusun ulang struktur yang sama di bawah `api_received/`
